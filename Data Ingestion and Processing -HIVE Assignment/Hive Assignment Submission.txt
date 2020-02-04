@@ -1,0 +1,751 @@
+﻿-- Data Ingestion and Processing - Assignment: HIVE
+
+-- Pre-requisite: 
+
+ADD JAR /opt/cloudera/parcels/CDH/lib/hive/lib/hive-hcatalog-core-1.1.0-cdh5.11.2.jar;
+SET hive.exec.max.dynamic.partitions=100000;
+SET hive.exec.max.dynamic.partitions.pernode=100000;
+
+-- Creating workspace for assignment:
+
+-- drop database pvn_db;
+create database if not exists pvn_db;
+use pvn_db;
+
+-- Creating external table:
+
+-- drop table if already exist:
+drop table pvn_db.nyc_yellowTaxiData;
+
+create external table if not exists pvn_db.nyc_yellowTaxiData(
+    VendorID int,
+    tpep_pickup_datetime timestamp,
+    tpep_dropoff_datetime timestamp,
+    Passenger_count int,
+    Trip_distance double,
+    RateCodeID int,
+    Store_and_fwd_flag string,
+    PULocationID int,
+    DOLocationID int,
+    Payment_type int,
+    Fare_amount double,
+    Extra double,
+    MTA_tax double,
+    Tip_amount double,
+    Tolls_amount double,
+    Improvement_surcharge double,
+    Total_amount double
+)
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ','
+LOCATION '/common_folder/nyc_taxi_data/'
+tblproperties ("skip.header.line.count"="1"); 
+
+--Checking if the data table has been loaded properly into our table:
+
+select * from pvn_db.nyc_yellowTaxiData limit 10;
+
+-- Checking total number of records:
+
+select count(*) from pvn_db.nyc_yellowTaxiData;
+
+-- 1174569 records
+
+-------------------Basic Data Quality Checks--------------------------------------------
+
+-----------------------------------------------------------------------------------------------------------------
+--- 1. How many records has each TPEP provider provided? 
+--- Write a query that summarises the number of records of each provider.
+
+select vendorid, count(*) 
+from pvn_db.nyc_yellowTaxiData
+group by vendorid;
+
+---vendorid	   count
+--- 2	       	 647183
+--- 1	       	 527386
+-- Vendor 2 (VeriFone Inc) provided larger number of records.
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+--- 2. The data provided is for months November and December only. 
+--- Check whether the data is consistent, and if not, identify the data quality issues. Mention all data quality issues in comments.
+
+--- Let us check column wise:
+
+--- ############## tpep_pickup_datetime ###############################-----------------------------------------
+
+select vendorid,YEAR(tpep_pickup_datetime) as yr, MONTH(tpep_pickup_datetime) as mnth,count(*) as total_pickup
+from pvn_db.nyc_yellowTaxiData
+GROUP BY VendorID, YEAR(tpep_pickup_datetime), MONTH(tpep_pickup_datetime)
+ORDER BY VendorID, yr, mnth;
+
+--- Though it was told that data is of Nov and Dec 2017, looks like we have data from 2003, 2008,2009 and 2018.
+--- And clearly as we see the data has come from Vendor 2.
+
+-- And as we know, any date before 1-Nov-2017 and after 31-Dec-2017 is out of context for tpep_pickup_datetime.
+-- Let us check how many such exist:
+
+select  vendorid, count(*)
+from  pvn_db.nyc_yellowTaxiData 
+where tpep_pickup_datetime < '2017-11-1 00:00:00.0' or tpep_pickup_datetime>='2018-01-01 00:00:00.0'
+group by vendorid;
+
+-- We see 14 records which are out of our date range. And all coming from vendor 2.
+
+--- ############## tpep_dropoff_datetime ##############################-------------------------------------------------------
+
+select vendorid,YEAR(tpep_dropoff_datetime) as yr, MONTH(tpep_dropoff_datetime) as mnth,count(*) as total_dropoff
+from pvn_db.nyc_yellowTaxiData
+GROUP BY VendorID, YEAR(tpep_dropoff_datetime), MONTH(tpep_dropoff_datetime)
+ORDER BY VendorID, yr, mnth;
+
+--- Even in dropoff_datetime column we see that data has come year 2003, 2008,2009,2018 and 2019.
+--- And clearly as we see the mismatch data has come from Vendor 2.
+
+-- And as we know, any date before 1-Nov-2017 and after 2-Jan-2018 is out of context for tpep_dropoff_datetime.
+-- Let us check how many such exist:
+
+select  vendorid, count(*)
+from  pvn_db.nyc_yellowTaxiData 
+where tpep_dropoff_datetime < '2017-11-1 00:00:00.0' or tpep_dropoff_datetime>='2018-01-02 00:00:00.0'
+group by vendorid;
+
+-- We see 7 records which are out of our date range. And around 6 of them are coming from vendor 2.
+
+-- As we analysed both the date columns, we see problems such as:
+-- Few data has year other than 2017 and also month other than 11 and 12.
+-- Few data is outside the our date range.
+
+-- Let us check the rest of the columns:
+
+--- ############## passenger_count ##################################--------------------------------------------
+
+select passenger_count, count(*) 
+from pvn_db.nyc_yellowTaxiData
+group by passenger_count;
+
+--passenger_count				count
+--   	 0	            			 6824
+--	  2				176872
+--	  4				24951
+--	  6				33146
+--	  8				3
+--	  1				827499
+--	  3				50693
+--	  5				54568
+--	  7				12
+--	  9				1
+-- passenger count above 6 is small which doesn't look suspicious. Passenger count like 7,8 and 9 can be from XL cars.
+
+
+-- As passenger_count cannot be 0,let us check about passenger_count = 0
+
+select vendorid, passenger_count, count(*)
+from pvn_db.nyc_yellowTaxiData
+where isnull(passenger_count) or passenger_count =0
+group by vendorid,passenger_count;
+
+--vendorid	passenger_count	 count	
+--   2			0                    11
+--   1			0	 6813
+-- Looks like vendor 1 is putting alot of passenger count data as zero or null.
+
+--- ############## Trip_distance ##############################-----------------------------------------------------------------
+
+--- Let us check max and min trip distance:
+
+select max(Trip_distance) as max_distance, min(trip_distance) as min_distance
+from pvn_db.nyc_yellowTaxiData;
+
+--- max = 126.41 and min = 0
+
+--- As we see min trip distance as zero, let us check about trip distance less and equal to zero:
+-- Assumption : Trip_distance can not be less than or equal to zero.
+
+select vendorid ,count(*)
+from pvn_db.nyc_yellowTaxiData
+where trip_distance <= 0  
+group by vendorid;
+
+--- 		vendorid		count
+--		2		3185
+--		1		4217
+
+--- Both the vendors are equally contributing to trip distance <=0
+
+--- ############### RateCodeID ##########################------------------------------------
+
+select  ratecodeid,count(*) 
+from  pvn_db.nyc_yellowTaxiData 
+group by ratecodeid
+order by ratecodeid;
+
+--- 		ratecodeid	count
+--		1		1142278
+--		2		25338
+--		3		2562
+--		4		586
+--		5		3793
+--		6		3
+--		99		9
+-- Ratecodeid from 1 to 6 is valid. Where as ratecodeid 99 is invalid.
+
+-- Let us check about ratecodeid =99:
+
+select vendorid , count(*) 
+from pvn_db.nyc_yellowTaxiData 
+where ratecodeid=99
+group by vendorid;
+
+-- 		vendorid  		count
+--		2		1
+--		1		8
+-- Compartively ventor 1 has provided more records of ratecodeid=99,which are invalid.
+
+
+--- ############### Store_and_fwd_flag ##############################------------------------
+
+select  store_and_fwd_flag, count(*) 
+from  pvn_db.nyc_yellowTaxiData 
+group by store_and_fwd_flag;
+
+-- the values look fine in this column.
+
+--- ############### PULocationID #####################---------------------------------------------------
+
+select vendorid ,count(*)
+from pvn_db.nyc_yellowTaxiData
+where PULocationID <= 0  
+group by vendorid;
+
+-- Data looks fine in this column. There are 0 records for PULocationID <= 0.
+
+--- ############### DOLocationID ##########################---------------------------------------------
+
+select vendorid ,count(*)
+from pvn_db.nyc_yellowTaxiData
+where DOLocationID <= 0  
+group by vendorid;
+-- Data looks fine in this column. There are 0 records for DOLocationID <= 0.
+
+--- ############### Payment_type ##############################----------------------------------------
+
+select Payment_type, count(*) 
+from  pvn_db.nyc_yellowTaxiData 
+group by Payment_type;
+-- Data looks fine in this column. Payment_type in data is spread between 1-4 value.
+
+--- ############### Fare_amount ###################################--------------------------------------
+
+-- Let us find max and minimum value:
+select max(Fare_amount) as max_fareamount, min(Fare_amount) as min_fareamount
+from pvn_db.nyc_yellowTaxiData;
+
+--- Max = 650 and min = -200
+
+-- Because the minimum fare amount is negative 200, let us check where is it coming from:
+-- As fare_amount cannot be negative.
+
+select vendorid, count(*) as count_negative ,sum(fare_amount) as negative_sum
+from pvn_db.nyc_yellowTaxiData
+where fare_amount<0
+group by vendorid;
+
+-- 	vendorid		count_negative			negative_sum
+-- 	2			558			-4917.38
+
+--Fare_amount coming from vendor 2 has some negative sum of -$4917.38 for around 558 times.
+
+--- ############### Extra ###################################-------------------------------------------------
+
+-- Let us find max and minimum value:
+
+select max(Extra) as max_value, min(Extra) as min_value
+from pvn_db.nyc_yellowTaxiData;
+
+-- max_value = 4.8
+-- min_value = -10.6
+
+-- We see that max and min value are very different from what is given in data disctionary.
+-- It says currently, it only includes the $0.50 and $1 rush hour and overnight charges.
+--- Let us check values other than these values:
+
+select vendorid, count(*) as extra_count_value
+from pvn_db.nyc_yellowTaxiData
+where extra NOT IN (0,0.5,1)
+group by vendorid;
+
+-- vendorid 	extra_count_value
+-- 2	                      3033
+-- 1	                      1823
+-- Both the vendorid has contributed for extra and subcharges value.
+
+--- ############### MTA_tax ###################################------------------------------------------------
+
+-- Let us find max and minimum value:
+
+select max(MTA_tax) as max_value, min(MTA_tax) as min_value
+from pvn_db.nyc_yellowTaxiData;
+
+--- Max = 11.4
+--- Min = -0.5
+
+-- Again, we see some negative value which is different from data dictionary.
+-- Let us where is it coming from:
+
+select vendorid, count(*) as mta_tax_count ,sum(mta_tax) as mta_tax_sum
+from pvn_db.nyc_yellowTaxiData
+where mta_tax NOT IN (0,0.5)
+group by VendorID;
+
+-- vendorid		mta_tax_count		mta_tax_sum
+-- 	2			547		-263
+--	1			1		11.4
+-- mta_tax also has some unusual values, mostly from vendor 2, i.e 547 times with total of -$263.
+
+--- ############### Tip_amount ###################################---------------------------------------
+-- Let us find max and minimum value:
+
+select max(Tip_amount) as max_value, min(Tip_amount) as min_value
+from pvn_db.nyc_yellowTaxiData;
+
+-- Max = 450
+-- Min = -1.16
+
+-- Again, there is negative minimum value. Tip_amount cannot be negative.
+--Let us have a closer look:
+select vendorid, count(*) as tip_amount_count ,sum(tip_amount) as sum_tip_amount
+from pvn_db.nyc_yellowTaxiData
+where tip_amount<0
+group by vendorid;
+
+-- vendorid	 tip_amount_count		sum_tip_amount
+--  2	         		4	             	 -3.5
+-- Tip_amount also has some unusual values, mostly from vendor 2, i.e 4 times with total of -$3.5.
+
+-- Also, as we understand from data dicitionary the Tip amount – This field is automatically populated 
+-- for credit card tips. Cash tips are not included. So let us this value:
+
+select vendorid,count(*) as invalid_tip_count
+from  pvn_db.nyc_yellowTaxiData 
+where Payment_type!=1 and tip_amount>0  
+group by vendorid;
+
+-- There are 17 records coming from vendor 1 which has tip amount charged for customers
+-- who are not using credit card. 
+
+-- As 17 records is more than 4 records, for this column - we see that vendor 1 has seeded more unusual value.
+
+--- ############### Tolls_amount ###################################--------------------------------------------------
+-- Let us find max and minimum value:
+
+select max(Tolls_amount) as max_value, min(Tolls_amount) as min_value
+from pvn_db.nyc_yellowTaxiData;
+
+-- Max = 895.89
+-- Min = -5.76
+-- Again, there is negative minimum value. Assuming tolls_amount cannot be negative.
+Let us have a closer look:
+
+select vendorid, count(*) as tolls_amount_count ,sum(Tolls_amount) as sum_tolls_amount
+from pvn_db.nyc_yellowTaxiData
+where Tolls_amount<0
+group by vendorid;
+
+-- vendorid	 tolls_amount_count		sum_tolls_amount
+--  2	         		3	             	 -17.28
+-- Tolls_amount also has some unusual values, mostly from vendor 2, i.e 3 times with total of -$17.28
+
+--- ############### Improvement_surcharge ##############################------------------------------------------
+-- Let us find max and minimum value:
+
+select max(Improvement_surcharge) as max_value, min(Improvement_surcharge) as min_value
+from pvn_db.nyc_yellowTaxiData;
+
+-- Max = 1
+-- Min = -0.3
+-- Let us have closer look at improvement_surcharge:
+
+select vendorid, count(*) as Improvement_surcharge_count ,sum(Improvement_surcharge) as Improvement_surcharge_sum
+from pvn_db.nyc_yellowTaxiData
+where Improvement_surcharge NOT IN (0,0.3)
+group by VendorID;
+
+-- vendorid	 Improvement_surcharge_count	Improvement_surcharge_count
+--  2	        		 562	              			-163.40
+-- All of it is coming from vendor 2.
+
+--- ############### Total_amount ###################################------------------------------------------------------------------------
+
+-- Let us find max and minimum value:
+
+select max(Total_amount) as max_value, min(Total_amount) as min_value
+from pvn_db.nyc_yellowTaxiData;
+
+-- Max = 928.19
+-- Min = -200.8
+-- We see that negative total_amount.Total_amount cannot be negative.
+--Let us have a look where is it coming from: 
+
+select vendorid, count(*) as Total_amount_count ,sum(Total_amount) as sum_Total_amount
+from pvn_db.nyc_yellowTaxiData
+where Total_amount<0
+group by vendorid;
+
+-- vendorid	 Improvement_surcharge_count	Improvement_surcharge_count
+--  2	                                  558	              			-5583.56
+-- All of it is coming from vendor 2 around 558 times.
+
+-- #################################################################### --------------------------------------------------------
+
+-- We inspected very column of the data. And here are the columns with data quality issues:
+
+-- tpep_pickup_datetime, tpep_dropoff_datetime, Passenger_count, Trip_distance
+-- RateCodeID, Fare_amount, Extra ,MTA_tax ,Tip_amount, Tolls_amount
+-- Improvement_surcharge and Total_amount 
+
+-- Side Note: Data quality issue of every column has been mentioned in the comment section after
+-- inspecting the respective column.
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+-- 3.You might have encountered unusual or erroneous rows in the dataset. 
+-- Can you conclude which vendor is doing a bad job in providing the records using different columns of the dataset?
+-- Summarise your conclusions based on every column where these errors are present. 
+-- For example,  There are unusual passenger count, i.e. 0 which is unusual.
+
+-- As we inspected each and every column in the above section, we have come across 
+-- some unusual values in the below mentioned column:
+
+-- Data quality issue from vendor 2:
+-- tpep_pickup_datetime
+-- tpep_dropoff_datetime
+-- Fare_amount
+-- MTA_tax
+-- Tolls_amount
+-- Improvement_surcharge
+-- Total_amount
+
+-- Data quality issue from vendor 1:
+-- Passenger_count
+-- RateCodeID
+-- Tip_amount
+
+-- Data quality issue from both the vendors: 
+-- Trip_distance
+-- Extra
+
+-- As we see from above data, Vendor 2 has provided more inconsistent data.
+
+----------------------------------------------------------------------------------------------------------------------------------
+   
+ ---------------------  DATA CLEANING AND ORC PARTITIONED TABLE --------------------------------------------
+
+ -- drop the table if already exist:
+ drop table pvn_db.ParOrc_nyc_yellowTaxiData;
+
+-- creating orc partitioned table:
+
+create external table if not exists pvn_db.ParOrc_nyc_yellowTaxiData(
+    VendorID int,
+    tpep_pickup_datetime timestamp,
+    tpep_dropoff_datetime timestamp,
+    Passenger_count int,
+    Trip_distance double,
+    RateCodeID int,
+    Store_and_fwd_flag string,
+    PULocationID int,
+    DOLocationID int,
+    Payment_type int,
+    Fare_amount double,
+    Extra double,
+    MTA_tax double,
+    Tip_amount double,
+    Tolls_amount double,
+    Improvement_surcharge double,
+    Total_amount double
+    )
+partitioned by (yr int, mnth int)
+stored as orc location '/user/pramodini.18_gmail/yellowTaxi_ParOrc'
+tblproperties ("orc.compress"="SNAPPY");
+
+----Inserting data to the partitioned table:
+
+insert overwrite table pvn_db.ParOrc_nyc_yellowTaxiData partition(yr, mnth)
+select
+    VendorID,
+    tpep_pickup_datetime,
+    tpep_dropoff_datetime,
+    passenger_count,
+    trip_distance,
+    RatecodeID,
+    store_and_fwd_flag,
+    PULocationID,
+    DOLocationID,
+    payment_type,
+    fare_amount,
+    extra,
+    mta_tax,
+    tip_amount,
+    tolls_amount,
+    improvement_surcharge,
+    total_amount,
+year(tpep_pickup_datetime) as yr, month(tpep_pickup_datetime) as mnth
+from pvn_db.nyc_yellowTaxiData
+where 
+(tpep_pickup_datetime >='2017-11-1 00:00:00.0' and tpep_pickup_datetime<'2018-01-01 00:00:00.0') AND
+(tpep_dropoff_datetime >= '2017-11-1 00:00:00.0' and tpep_dropoff_datetime<'2018-01-02 00:00:00.0') AND
+(tpep_dropoff_datetime>tpep_pickup_datetime) AND
+(passenger_count not in (0)) AND
+(RateCodeID IN (1,2,3,4,5,6)) AND
+(trip_distance>0) AND 
+(fare_amount >0) AND
+(extra in (0,0.5,1))AND
+(mta_tax  in (0,0.5)) AND
+((tip_amount >=0 and Payment_type=1) or (Payment_type!=1 and tip_amount=0))AND
+(tolls_amount >=0)AND
+(improvement_surcharge in (0,0.3))AND
+(total_amount>0);
+
+-- checking data in partitioned table:
+select * from pvn_db.ParOrc_nyc_yellowTaxiData limit 10;
+
+-- checking for final number of available:
+select count(*) from pvn_db.ParOrc_nyc_yellowTaxiData;
+--  1153587 records.
+
+--------------------------------------------------------------------------------------------------------------------------
+
+--------------------- Analysis-I ------------------------------------------------------------------------------------
+
+-- 1. Compare the overall average fare per trip for November and December.
+
+select mnth, avg(fare_amount) as Average_fare_amount
+from pvn_db.ParOrc_nyc_yellowTaxiData
+group by mnth;
+
+-- mnth	 average_fare_amount
+-- 11	 12.906146212157092
+-- 12	 12.698509303146507
+----------------------------------------------------------------------------------------------------------------------------------------------------
+-- 2. Explore the ‘number of passengers per trip’ - how many trips are made by each level of ‘Passenger_count’? 
+-- Do most people travel solo or with other people?
+
+select passenger_count , count(*) as total_passenger
+from pvn_db.ParOrc_nyc_yellowTaxiData
+group by passenger_count
+order by passenger_count;
+
+-- passenger_count	   total_passenger
+--	 1	                 817019
+--	 2	                 174783
+--	 3	                 50183
+--	 4	                 24680
+--	 5	                 54037
+--	 6	                 32882
+--	 7	                  3
+
+-- Most of the people prefer solo travel as we see hightest passenger count of 817019 is for passenger_count =1.
+---------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- 3. Which is the most preferred mode of payment?
+
+select payment_type , count(*) as count_payment_type, round(((count(*)/1153587)*100),2) as percentage_payment_type
+from pvn_db.ParOrc_nyc_yellowTaxiData
+group by payment_type
+order by payment_type;
+
+-- payment_type	 count_payment_type	 percentage_payment_type
+--	1	           779153	           	67.54
+--	2	           368659	          	 31.96
+--	3	           4480	               	0.39
+--	4	           1295	              	 0.11
+
+-- As we see, payment_type =1 which is 'Credit card' is the most preferred mode of payment.
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- 4. What is the average tip paid per trip? 
+-- Compare the average tip with the 25th, 50th and 75th percentiles and comment whether the ‘average tip’ is a representative statistic 
+-- (of the central tendency) of ‘tip amount paid’. 
+-- Hint: You may use percentile_approx(DOUBLE col, p): Returns an approximate pth percentile of a numeric column 
+-- (including floating point types) in the group.
+
+-- Average tip paid per trip:
+
+select avg(tip_amount) as avg_tip_amount
+from pvn_db.ParOrc_nyc_yellowTaxiData;
+
+-- avg_tip_amount = 1.825725376585753
+
+-- 25th, 50th and 75th percentiles:
+
+select percentile_approx(tip_amount, 0.25) as 25th_percentile,
+percentile_approx(tip_amount, 0.50) as 50th_percentile,
+percentile_approx(tip_amount, 0.75) as 75th_percentile
+from pvn_db.ParOrc_nyc_yellowTaxiData;
+
+-- 25th_percentile = 0
+-- 50th_percentile = 1.3596549479166669
+-- 75th_percentile = 2.45
+
+-- As we see 50th_percentile is 1.35 where as our average tip amount is 1.82, this shows us
+-- The average tip  is not a representative statistic (of the central tendency) of tip amount.
+--------------------------------------------------------------------------------------------------------------------------------------------
+-- 5. Explore the ‘Extra’ (charge) variable - what fraction of total trips have an extra charge is levied?
+
+select diff_extra_cases , count(*) as count_per_case, round(((count(*)/1153587)*100),2) as percentage_per_case
+from (
+select case when extra>0 then 'levied' else 'not charged' end  diff_extra_cases
+from pvn_db.ParOrc_nyc_yellowTaxiData 
+) A
+group by diff_extra_cases;
+
+-- diff_extra_cases	 count_per_case	 percentage_per_case
+-- not charged	                621259	            53.85
+--  levied	               	                532328	            46.15
+
+-- 46.15% of trips have an extra charge is levied.
+---------------------------------------------------------------------------------------------------------------------------------------
+
+--------------------- Analysis-II ------------------------------------------------------------
+
+-- 1. What is the correlation between the number of passengers on any given trip, and the tip paid per trip? 
+-- Do multiple travellers tip more compared to solo travellers? Hint: Use CORR(Col_1, Col_2)
+
+select CORR(tip_amount, passenger_count)
+from pvn_db.ParOrc_nyc_yellowTaxiData;
+
+-- correlation = -0.005286642903598837
+-- We see weak negative correlation.
+-- This means they are inversely related. That is as number of passengers increases, the tip amount decreases.
+-- So solo travellers pay more than multiple travellers.
+
+-- Do multiple travellers tip more compared to solo travellers?
+
+select solo_trip , avg(tip_amount) as avg_tip_amount
+from (
+select case when passenger_count =1 then 'solo' else 'multiple' end solo_trip, tip_amount
+from pvn_db.ParOrc_nyc_yellowTaxiData 
+) A
+group by solo_trip;
+
+-- 	solo_trip		avg_tip_amount
+--	multiple	        1.8022519966248003
+-- 	solo	        1.8353951499289287
+-- We see that solo traveller pay slightly more than multiple traveller.
+
+--------------------------------------------------------------------------------------------------------------------------------------------
+-- 2. Segregate the data into five segments of ‘tip paid’: [0-5), [5-10), [10-15) , [15-20) and >=20. 
+-- Calculate the percentage share of each bucket (i.e. the fraction of trips falling in each bucket).
+
+select tip_bucket, count(*) as count_per_bucket, round(((count(*)/1153587)*100),2) as percentage_per_bucket
+from (select
+case 
+when (tip_amount>=0 and tip_amount<5)   then '0_to_5'
+when (tip_amount>=5 and tip_amount<10)  then '5_to_10' 
+when (tip_amount>=10 and tip_amount<15) then '10_to_15'
+when (tip_amount>=15 and tip_amount<20) then '15_to_20'
+when (tip_amount>=20)                   then 'Above20'
+end tip_bucket
+from pvn_db.ParOrc_nyc_yellowTaxiData)A
+group by tip_bucket
+order by percentage_per_bucket;
+
+-- 	tip_bucket	count_per_bucket			percentage_per_bucket
+--	Above20			1016				0.09
+--	15_to_20			2160				0.19
+--	10_to_15			19414				1.68
+--	5_to_10			65039				5.64
+--	0_to_5			1065958				92.4
+---------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- 3. Which month has a greater average ‘speed’ - November or December? 
+-- Note that the variable ‘speed’ will have to be derived from other metrics.
+-- Hint: You have columns for distance and time.
+
+-- As we speed = distance/time taken
+
+select mnth, 
+AVG(trip_distance/((UNIX_TIMESTAMP(tpep_dropoff_datetime) - UNIX_TIMESTAMP(tpep_pickup_datetime))/3600)) as Avg_Speed
+from pvn_db.ParOrc_nyc_yellowTaxiData
+group by mnth;
+
+--mnth	avg_speed
+--11	10.965568910652896
+--12	11.06518356713365
+
+-- We see that December month has greater average speed.
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- 4. Analyse the average speed of the most happening days of the year, 
+-- i.e. 31st December (New year’s eve) and 25th December (Christmas) and compare it with the overall average. 
+
+-- Overall average speed:
+select avg(trip_distance/((unix_timestamp(tpep_dropoff_datetime)-unix_timestamp(tpep_pickup_datetime) )/3600)) as overall_avg_speed
+from pvn_db.ParOrc_nyc_yellowTaxiData;
+
+-- overall_avg_speed = 11.015961058469964
+
+-- In case, if the question is referring to overall average as only 'Dec' month average:
+
+select mnth, 
+AVG(trip_distance/((UNIX_TIMESTAMP(tpep_dropoff_datetime) - UNIX_TIMESTAMP(tpep_pickup_datetime))/3600)) as Avg_Speed
+from pvn_db.ParOrc_nyc_yellowTaxiData
+group by mnth;
+
+--mnth	avg_speed
+--11	10.965568910652896
+--12	11.06518356713365
+
+-- On Christmas:
+
+select Christmas_day, avg(Christmas_day_speed) as avg_Christmas_day_speed 
+from 
+(
+select 
+case 
+when (tpep_pickup_datetime>='2017-12-25 00:00:00.0' and tpep_pickup_datetime<'2017-12-26 00:00:00.0') then 1 else 0 
+end Christmas_day, 
+(trip_distance/((unix_timestamp(tpep_dropoff_datetime)-unix_timestamp(tpep_pickup_datetime) )/3600)) Christmas_day_speed
+from pvn_db.ParOrc_nyc_yellowTaxiData)A
+group by Christmas_day;
+
+-- avg_Christmas_day_speed = 15.265472922267561
+
+-- On New year's eve:
+
+select 31st_dec, avg(31st_dec_speed) as avg_31st_dec_speed 
+from 
+(
+select 
+case 
+when (tpep_pickup_datetime>='2017-12-31 00:00:00.0' and tpep_pickup_datetime<'2018-01-01 00:00:00.0') then 1 else 0 
+end 31st_dec, 
+(trip_distance/((unix_timestamp(tpep_dropoff_datetime)-unix_timestamp(tpep_pickup_datetime) )/3600)) 31st_dec_speed
+from pvn_db.ParOrc_nyc_yellowTaxiData)A
+group by 31st_dec;
+
+--  New year's eve average speed = 13.24443200187595
+
+-- Average speed on happening days(Overall):
+
+select happening_days, avg(happening_days_speed) as avg_happening_day_speed 
+from 
+(
+select 
+case 
+when ((tpep_pickup_datetime>='2017-12-25 00:00:00.0' and tpep_pickup_datetime<'2017-12-26 00:00:00.0') 
+or (tpep_pickup_datetime>='2017-12-31 00:00:00.0' and tpep_pickup_datetime<'2018-01-01 00:00:00.0')  ) then 'Happening_days' else 'Normal_days'
+end happening_days, 
+(trip_distance/((unix_timestamp(tpep_dropoff_datetime)-unix_timestamp(tpep_pickup_datetime) )/3600)) happening_days_speed
+from pvn_db.ParOrc_nyc_yellowTaxiData)As
+group by happening_days;
+
+-- happening_days				avg_happening_day_speed
+-- Normal_days				10.95162624541977
+-- Happening_days				14.012324199152843 
+
+
+-- Overall average speed is 11.02
+-- Incase, if overall means only December month average speed(as the question is not clear) = 11.06
+-- Average speed on Christmas day = 15.27
+-- Average speed on New year's eve = 13.24
+-- Average speed on happening days (Christmas or New year's eve) = 14.012
+-- Average speed on happening days is greater than overall average speed.
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
