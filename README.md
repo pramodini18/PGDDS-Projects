@@ -1,1 +1,1 @@
-# PGDDS-Projects
+# Post Graduate Diploma Data Science Projects
